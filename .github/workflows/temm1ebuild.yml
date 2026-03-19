@@ -1,0 +1,140 @@
+name: Build temm1e nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *' # chạy mỗi ngày lúc 00:00 UTC
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build temm1e (latest, Linux x86_64)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Install Rust toolchain (stable)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl pkg-config build-essential git
+
+      - name: Fetch latest temm1e source
+        run: |
+          git clone --depth 1 https://github.com/nagisanzenin/temm1e.git
+          cd temm1e
+          git rev-parse HEAD > ../temm1e_commit.txt
+
+      - name: Build temm1e (release)
+        working-directory: temm1e
+        run: cargo build --release
+
+      - name: Show commit used
+        run: |
+          echo "Built from temm1e commit:"
+          cat temm1e_commit.txt
+
+      - name: Create dated release and upload binary
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // yyyy-mm-dd theo UTC
+            const today = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
+            const tag = today;
+            const name = today;
+
+            const commitFile = path.join(process.cwd(), 'temm1e_commit.txt');
+            let commit = '';
+            if (fs.existsSync(commitFile)) {
+              commit = fs.readFileSync(commitFile, 'utf8').trim();
+            }
+
+            const bodyLines = [
+              `Nightly build of temm1e for Linux x86_64.`,
+              '',
+              `Upstream repo: https://github.com/nagisanzenin/temm1e`,
+              `Upstream commit: ${commit || '(unknown)'}`,
+            ];
+            const body = bodyLines.join('\n');
+
+            core.info(`Using tag/release name: ${tag}`);
+
+            // Tìm release theo tag; nếu chưa có thì tạo mới
+            let release;
+            try {
+              release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              core.info(`Found existing release for tag ${tag}, reusing.`);
+            } catch (error) {
+              if (error.status === 404) {
+                core.info(`No release for tag ${tag}, creating new release.`);
+                release = await github.rest.repos.createRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_name: tag,
+                  name,
+                  draft: false,
+                  prerelease: false,
+                  body,
+                });
+              } else {
+                throw error;
+              }
+            }
+
+            const releaseId = release.data.id;
+
+            const filePath = path.join(
+              process.cwd(),
+              'temm1e',
+              'target',
+              'release',
+              'temm1e'
+            );
+
+            core.info(`Uploading asset from ${filePath} ...`);
+
+            const data = fs.readFileSync(filePath);
+
+            // Nếu asset cùng tên đã tồn tại, API sẽ báo lỗi 422.
+            // Để đơn giản, ta xóa asset cũ (nếu có) rồi upload mới.
+            const assets = await github.rest.repos.listReleaseAssets({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+            });
+
+            const existing = assets.data.find(a => a.name === 'temm1e-linux-amd64');
+            if (existing) {
+              core.info(`Deleting existing asset temm1e-linux-amd64 (id=${existing.id})`);
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: existing.id,
+              });
+            }
+
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              name: 'temm1e-linux-amd64',
+              data,
+            });
+
+            core.info('Release asset upload finished.');

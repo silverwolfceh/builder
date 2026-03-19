@@ -1,0 +1,131 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0' # once a week
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.result }}
+    steps:
+      - name: Find latest version
+        id: version
+        uses: actions/github-script@v6
+        with:
+          result-encoding: string
+          script: |
+            const result = await github.graphql(`query($owner:String!, $repo:String!) {
+              remote: repository(owner:"containers", name:"skopeo") {
+                latestRelease {
+                  tagName
+                }
+              }
+              local: repository(owner:$owner, name:$repo) {
+                latestRelease {
+                  tagName
+                }
+              }
+            }`, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            console.log(result);
+
+            const remote = result?.remote?.latestRelease?.tagName || null;
+            const local = result?.local?.latestRelease?.tagName || null;
+
+            if (!remote) {
+              core.info("No remote release found, skipping.");
+              return 'nope';
+            }
+
+            if (remote === local) {
+              core.info(`Local repo already at latest release ${remote}, skipping.`);
+              return 'nope';
+            }
+
+            // strip leading v
+            return remote.replace(/^v/, '');
+
+  build:
+    needs: version
+    if: needs.version.outputs.version != 'nope'
+
+    name: Build
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - name: Checkout (optional, if you need repo content)
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 curl make
+
+      - name: Fetch source
+        run: curl -L "https://github.com/containers/skopeo/archive/refs/tags/v${{ env.VERSION }}.tar.gz" -o - | tar xzv
+
+      - name: Build skopeo (Windows amd64)
+        working-directory: skopeo-${{ env.VERSION }}
+        run: make bin/skopeo.windows.amd64.exe
+
+      - name: Create release and upload asset
+        uses: actions/github-script@v6
+        env:
+          VERSION: ${{ env.VERSION }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const tag = `v${process.env.VERSION}`;
+            const name = tag;
+            const body = `Skopeo v${process.env.VERSION} for Windows (no signing/gpg support)`;
+
+            core.info(`Creating release ${tag} ...`);
+
+            const release = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name,
+              draft: false,
+              prerelease: false,
+              body,
+            });
+
+            const filePath = path.join(
+              process.cwd(),
+              `skopeo-${process.env.VERSION}`,
+              'bin',
+              'skopeo.windows.amd64.exe'
+            );
+
+            core.info(`Uploading asset from ${filePath} ...`);
+
+            const data = fs.readFileSync(filePath);
+
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.data.id,
+              name: 'skopeo.exe',
+              data,
+            });
+
+            core.info('Release and asset upload finished.');

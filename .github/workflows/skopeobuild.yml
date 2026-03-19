@@ -1,4 +1,4 @@
-name: Build
+name: SkopeoForWindow
 
 on:
   workflow_dispatch:

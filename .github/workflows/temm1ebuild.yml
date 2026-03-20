@@ -52,8 +52,8 @@ jobs:
 
             // yyyy-mm-dd theo UTC
             const today = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
-            const tag = today;
-            const name = today;
+            const tag = "temm1e-" + today;
+            const name = "temm1e-" + today;
 
             const commitFile = path.join(process.cwd(), 'temm1e_commit.txt');
             let commit = '';

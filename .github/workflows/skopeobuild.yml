@@ -1,4 +1,4 @@
-name: SkopeoForWindow
+name: Skopeo for window builder
 
 on:
   workflow_dispatch:
